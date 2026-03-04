@@ -16,20 +16,23 @@
             <a href="{{ url_for('labeling_page') }}" class="nav-step {% if active_step == 'labeling' %}active{% endif %} {% if state.block_topics %}done{% endif %} {% if not state.text_blocks %}disabled{% endif %}">
                 2. Labeling
             </a>
-            <a href="{{ url_for('toc_page') }}" class="nav-step {% if active_step == 'toc' %}active{% endif %} {% if state.toc_bundle %}done{% endif %} {% if not state.block_topics %}disabled{% endif %}">
-                3. TOC
+            <a href="{{ url_for('questions_page') }}" class="nav-step {% if active_step == 'questions' %}active{% endif %} {% if state.questions_rows %}done{% endif %} {% if not state.block_topics %}disabled{% endif %}">
+                3. Questions
             </a>
-            <a href="{{ url_for('chapterization_page') }}" class="nav-step {% if active_step == 'chapterization' %}active{% endif %} {% if state.chapter_breaks %}done{% endif %} {% if not state.block_topics %}disabled{% endif %}">
-                4. Chapters
+            <a href="{{ url_for('toc_page') }}" class="nav-step {% if active_step == 'toc' %}active{% endif %} {% if state.toc_bundle %}done{% endif %} {% if (not state.block_topics) or (not state.questions_rows) %}disabled{% endif %}">
+                4. TOC
+            </a>
+            <a href="{{ url_for('chapterization_page') }}" class="nav-step {% if active_step == 'chapterization' %}active{% endif %} {% if state.chapter_breaks %}done{% endif %} {% if not state.toc_bundle %}disabled{% endif %}">
+                5. Chapters
             </a>
             <a href="{{ url_for('summarization_page') }}" class="nav-step {% if active_step == 'summarization' %}active{% endif %} {% if state.chapters %}done{% endif %} {% if not state.chapter_breaks %}disabled{% endif %}">
-                5. Summary
+                6. Summary
             </a>
             <a href="{{ url_for('tuning_page') }}" class="nav-step {% if active_step == 'tuning' %}active{% endif %} {% if state.tuning_results %}done{% endif %} {% if not state.main_summary %}disabled{% endif %}">
-                6. Tuning
+                7. Tuning
             </a>
             <a href="{{ url_for('results_page') }}" class="nav-step {% if active_step == 'results' %}active{% endif %} {% if not state.main_summary %}disabled{% endif %}">
-                7. Results
+                8. Results
             </a>
         </div>
     </nav>

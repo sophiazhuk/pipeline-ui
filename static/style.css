@@ -232,6 +232,21 @@ input[type="number"]:focus {
     border-color: #2d5a8e;
 }
 
+input[type="text"] {
+    background: #0d0d0d;
+    color: #d0d0d0;
+    border: 1px solid #333;
+    border-radius: 4px;
+    padding: 8px 10px;
+    font-family: inherit;
+    font-size: 13px;
+}
+
+input[type="text"]:focus {
+    outline: none;
+    border-color: #2d5a8e;
+}
+
 /* ── file upload ───────────────────────────────────────── */
 .upload-zone {
     border: 2px dashed #333;
@@ -377,4 +392,62 @@ input[type="number"]:focus {
 
 @keyframes spin {
     to { transform: rotate(360deg); }
+}
+
+.questions-table {
+    width: 100%;
+    border-collapse: collapse;
+    min-width: 980px;
+}
+
+.questions-table th,
+.questions-table td {
+    border: 1px solid #2a2a2a;
+    padding: 10px;
+    vertical-align: top;
+    font-size: 12px;
+}
+
+.questions-table th {
+    color: #aaa;
+    background: #161616;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    font-weight: 600;
+}
+
+.questions-table .mono {
+    font-family: "SF Mono", "Fira Code", "Consolas", monospace;
+    color: #999;
+}
+
+.confidence-dot {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    margin-right: 8px;
+    vertical-align: middle;
+}
+
+.confidence-high { background: #34c759; }
+.confidence-medium { background: #f4b400; }
+.confidence-low { background: #ff5a5f; }
+
+.btn-mini {
+    padding: 4px 10px;
+    font-size: 11px;
+    margin-bottom: 6px;
+}
+
+.snippet-box {
+    margin-top: 8px;
+    background: #0b0b0b;
+    border: 1px solid #2a2a2a;
+    border-radius: 4px;
+    padding: 8px;
+    color: #9ab;
+    max-width: 340px;
+    white-space: pre-wrap;
+    line-height: 1.4;
 }

@@ -44,7 +44,9 @@
         <textarea name="edited_output" class="output-box">{{ state.block_topics | tojson(indent=2) }}</textarea>
 
         <div class="btn-row">
-            <button type="submit" class="btn btn-primary">Continue to TOC →</button>
+            <button type="submit" class="btn btn-primary">
+                Continue to Questions →
+            </button>
             <button type="button" class="btn btn-secondary" onclick="document.getElementById('labeling-form').submit()">Restart Step</button>
         </div>
     </form>

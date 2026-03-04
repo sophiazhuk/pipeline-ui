@@ -1,11 +1,11 @@
 {% extends "base.html" %}
 {% set active_step = 'toc' %}
 
-{% block title %}3. TOC — Pipeline Demo{% endblock %}
+{% block title %}4. TOC — Pipeline Demo{% endblock %}
 
 {% block content %}
 <div class="step-header">
-    <h1>Step 3 — Table of Contents</h1>
+    <h1>Step 4 — Table of Contents</h1>
     <p>This step builds a Hierarchical TOC by merging labeled blocks by main topic and subtopics. This step doesn't make any API calls. You can also edit the JSON output.</p>
 </div>
 
@@ -17,7 +17,9 @@
 
         <div class="btn-row">
             <button type="submit" class="btn btn-primary">Continue to Chapterization →</button>
-            <a href="{{ url_for('labeling_page') }}" class="btn btn-secondary">← Back to Labeling</a>
+            <a href="{{ url_for('questions_page') }}" class="btn btn-secondary">
+                ← Back
+            </a>
         </div>
     </form>
 </div>
@@ -49,7 +51,7 @@
     <div class="output-block"><pre>No labeled blocks available. Complete the labeling step first.</pre></div>
 </div>
 <div class="btn-row">
-    <a href="{{ url_for('labeling_page') }}" class="btn btn-primary">← Back to Labeling</a>
+    <a href="{{ url_for('questions_page') }}" class="btn btn-primary">← Back</a>
 </div>
 {% endif %}
 {% endblock %}

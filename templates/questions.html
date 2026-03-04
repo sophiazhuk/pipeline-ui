@@ -1,0 +1,217 @@
+{% extends "base.html" %}
+{% set active_step = 'questions' %}
+
+{% block title %}3. Questions — Pipeline Demo{% endblock %}
+
+{% block content %}
+<div class="step-header">
+    <h1>Step 3 — Interviewer Questions</h1>
+    <p>Review extracted interviewer questions, adjust text/status, and run low-confidence verification.</p>
+</div>
+
+{% if questions_message %}
+<div class="panel" style="border-color: #2a6a4a;">
+    <div class="output-block" style="color: #8e8;">{{ questions_message }}</div>
+</div>
+{% endif %}
+
+{% if questions_error or state.questions_error %}
+<div class="panel" style="border-color: #5a2d2d;">
+    <div class="output-block" style="color: #e88;">{{ questions_error or state.questions_error }}</div>
+</div>
+{% endif %}
+
+<form action="{{ url_for('questions_load') }}" method="post" class="panel">
+    <div class="panel-label">Question Artifact Loader</div>
+    <div class="controls-row">
+        <div class="control-group" style="min-width: 260px;">
+            <label>Interview ID</label>
+            <input type="text" name="interview_id_override" value="{{ state.interview_id or '' }}" style="width: 100%;">
+        </div>
+        <div class="control-group" style="min-width: 420px; flex: 1;">
+            <label>Questions JSON path (optional)</label>
+            <input type="text" name="questions_json_path" value="{{ state.questions_json_path_override or '' }}" style="width: 100%;">
+        </div>
+    </div>
+    <div class="btn-row">
+        <button type="submit" class="btn btn-secondary">Reload Question Artifact</button>
+    </div>
+    {% if state.questions_artifact_path %}
+    <div style="font-size: 12px; color: #777; margin-top: 8px;">Loaded from: {{ state.questions_artifact_path }}</div>
+    {% endif %}
+</form>
+
+<form id="questions-form" action="{{ url_for('questions_update') }}" method="post">
+    <input type="hidden" name="edited_output" id="edited-output" value="">
+
+    <div class="panel">
+        <div class="panel-label">Question Table</div>
+
+        {% if state.question_stats %}
+        <div style="font-size: 12px; color: #888; margin-bottom: 12px;">
+            Total: {{ state.question_stats.total }} |
+            High: {{ state.question_stats.confidence.high }} |
+            Medium: {{ state.question_stats.confidence.medium }} |
+            Low: {{ state.question_stats.confidence.low }} |
+            Verified: {{ state.question_stats.status.verified }} |
+            Needs review: {{ state.question_stats.status.needs_review }} |
+            Rejected: {{ state.question_stats.status.rejected }}
+        </div>
+        {% endif %}
+
+        {% if state.questions_rows and state.questions_rows|length > 0 %}
+        <div style="overflow-x: auto;">
+            <table class="questions-table">
+                <thead>
+                    <tr>
+                        <th>Question</th>
+                        <th>Timestamp</th>
+                        <th>Confidence</th>
+                        <th>Status</th>
+                        <th>Notes</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                {% for q in state.questions_rows %}
+                    {% set preview = state.question_previews.get(q.id) %}
+                    <tr data-question-id="{{ q.id }}">
+                        <td>
+                            <textarea class="question-text" rows="2">{{ q.question_text }}</textarea>
+                        </td>
+                        <td class="mono">
+                            {{ q.start_time }} → {{ q.end_time }}
+                        </td>
+                        <td>
+                            <span class="confidence-dot confidence-{{ q.confidence_band }}" title="{% if q.confidence_band == 'high' %}High confidence (>= 0.80){% elif q.confidence_band == 'medium' %}Medium confidence (0.65 to 0.79){% else %}Low confidence (< 0.65){% endif %}"></span>
+                            <span class="mono">{{ '%.3f'|format(q.confidence) }}</span>
+                        </td>
+                        <td>
+                            <select class="question-status">
+                                <option value="unreviewed" {% if q.status == 'unreviewed' %}selected{% endif %}>unreviewed</option>
+                                <option value="verified" {% if q.status == 'verified' %}selected{% endif %}>verified</option>
+                                <option value="rejected" {% if q.status == 'rejected' %}selected{% endif %}>rejected</option>
+                                <option value="needs_review" {% if q.status == 'needs_review' %}selected{% endif %}>needs_review</option>
+                            </select>
+                        </td>
+                        <td>
+                            <textarea class="question-notes" rows="2">{{ q.notes or '' }}</textarea>
+                        </td>
+                        <td>
+                            <button type="button" class="btn btn-secondary btn-mini toggle-snippet">Snippet</button>
+                            <button type="button" class="btn btn-secondary btn-mini verify-one-btn">Verify</button>
+                            <div class="snippet-box" style="display:none;">
+                                {% if preview %}
+                                <div class="mono" style="font-size: 11px; color: #888;">
+                                    Segments {{ preview.start_idx }}–{{ preview.end_idx }} | {{ preview.start_time }} → {{ preview.end_time }}
+                                </div>
+                                <div style="margin-top: 6px;">{{ preview.snippet_text }}</div>
+                                {% else %}
+                                <div>No transcript snippet available.</div>
+                                {% endif %}
+                            </div>
+                        </td>
+                    </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+
+        <div class="btn-row">
+            <button type="submit" class="btn btn-primary">Save Question Decisions</button>
+            <button type="button" id="verify-low-btn" class="btn btn-secondary">Verify All Low-Confidence</button>
+            <a href="{{ url_for('toc_page') }}" class="btn btn-primary">Continue to TOC →</a>
+            <a href="{{ url_for('labeling_page') }}" class="btn btn-secondary">← Back</a>
+        </div>
+
+        {% if state.question_verify_progress %}
+        <div style="margin-top: 10px; font-size: 12px; color: #777;">
+            Verify progress:
+            total={{ state.question_verify_progress.total }},
+            processed={{ state.question_verify_progress.processed }},
+            failed={{ state.question_verify_progress.failed }},
+            skipped_budget={{ state.question_verify_progress.skipped_budget }},
+            remaining_budget={{ state.question_verify_progress.remaining_budget }}
+        </div>
+        {% endif %}
+        {% else %}
+        <div class="output-block"><pre>No interviewer questions loaded yet for this interview.</pre></div>
+        <div class="btn-row">
+            <a href="{{ url_for('toc_page') }}" class="btn btn-primary">Continue to TOC →</a>
+            <a href="{{ url_for('labeling_page') }}" class="btn btn-secondary">← Back</a>
+        </div>
+        {% endif %}
+    </div>
+</form>
+
+<form id="verify-one-form" method="post" action="{{ url_for('questions_verify_one') }}" style="display:none;">
+    <input type="hidden" name="question_id" id="verify-one-id" value="">
+    <input type="hidden" name="edited_output" id="verify-one-output" value="">
+</form>
+
+<form id="verify-low-form" method="post" action="{{ url_for('questions_verify_low') }}" style="display:none;">
+    <input type="hidden" name="edited_output" id="verify-low-output" value="">
+</form>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    function collectRows() {
+        const rows = [];
+        document.querySelectorAll('tr[data-question-id]').forEach((rowEl) => {
+            const id = rowEl.dataset.questionId;
+            const questionText = rowEl.querySelector('.question-text')?.value || '';
+            const status = rowEl.querySelector('.question-status')?.value || 'unreviewed';
+            const notes = rowEl.querySelector('.question-notes')?.value || '';
+
+            const sourceRow = {{ state.questions_rows | tojson if state.questions_rows else '[]' }}.find((q) => q.id === id);
+            if (!sourceRow) return;
+
+            rows.push({
+                ...sourceRow,
+                question_text: questionText,
+                status,
+                notes,
+                edited: sourceRow.question_text !== questionText || (sourceRow.notes || '') !== notes
+            });
+        });
+        return rows;
+    }
+
+    const form = document.getElementById('questions-form');
+    if (form) {
+        form.addEventListener('submit', function() {
+            const payload = JSON.stringify(collectRows());
+            document.getElementById('edited-output').value = payload;
+        });
+    }
+
+    document.querySelectorAll('.toggle-snippet').forEach((btn) => {
+        btn.addEventListener('click', () => {
+            const box = btn.parentElement.querySelector('.snippet-box');
+            if (!box) return;
+            box.style.display = box.style.display === 'none' ? 'block' : 'none';
+        });
+    });
+
+    document.querySelectorAll('.verify-one-btn').forEach((btn) => {
+        btn.addEventListener('click', () => {
+            const row = btn.closest('tr[data-question-id]');
+            if (!row) return;
+            document.getElementById('verify-one-id').value = row.dataset.questionId;
+            document.getElementById('verify-one-output').value = JSON.stringify(collectRows());
+            document.getElementById('verify-one-form').submit();
+        });
+    });
+
+    const verifyLowBtn = document.getElementById('verify-low-btn');
+    if (verifyLowBtn) {
+        verifyLowBtn.addEventListener('click', () => {
+            verifyLowBtn.innerHTML = '<span class="spinner"></span>Verifying...';
+            verifyLowBtn.disabled = true;
+            document.getElementById('verify-low-output').value = JSON.stringify(collectRows());
+            document.getElementById('verify-low-form').submit();
+        });
+    }
+</script>
+{% endblock %}

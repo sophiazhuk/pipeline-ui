@@ -1,0 +1,30 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment and secrets
+.env
+.env.*
+*.pem
+*.key
+
+# Flask/session and local runtime files
+instance/
+*.sqlite3
+*.db
+
+# Uploads and generated artifacts
+uploads/*
+!uploads/.gitkeep
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

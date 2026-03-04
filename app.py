@@ -14,6 +14,28 @@ from uuid import uuid4
 from flask import Flask, render_template, request, redirect, url_for, jsonify, send_file, session
 from werkzeug.local import LocalProxy
 from werkzeug.utils import secure_filename
+from processor.question_verifier import verify_question
+from processor.questions import (
+    apply_saved_decisions,
+    compute_question_stats,
+    confidence_band,
+    extract_snippet_by_timestamp,
+    hash_text,
+    load_questions_artifact,
+    normalize_rows_from_ui,
+    resolve_interview_id,
+    utc_now_iso,
+)
+from processor.questions_store import (
+    get_cached_llm_result,
+    get_daily_usage,
+    get_db_path,
+    increment_daily_usage,
+    init_db,
+    load_decisions,
+    set_cached_llm_result,
+    upsert_decision,
+)
 
 # ── app setup ──────────────────────────────────────────────────────────
 BASE_DIR = os.path.dirname(__file__)
@@ -21,6 +43,8 @@ app = Flask(__name__)
 app.secret_key = os.getenv('FLASK_SECRET_KEY') or os.urandom(24)
 app.config['UPLOAD_FOLDER'] = os.path.join(BASE_DIR, 'uploads')
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+QUESTIONS_DB_PATH = get_db_path(BASE_DIR)
+init_db(QUESTIONS_DB_PATH)
 
 # ── pipeline state (per browser session, resets on restart) ───────────
 # Each visitor gets an isolated in-memory pipeline state.
@@ -38,11 +62,28 @@ def _new_state():
         "segments": None,            # List[SRTSegment]
         "plaintext_transcript": None,
         "text_blocks": None,         # List[Dict]
+        "interview_id": None,
+
+        # workflow settings
+        "questions_json_path_override": "",
 
         # step 2 - labeling
         "labeling_sys_prompt": "",
         "labeling_user_prompt": "",
         "block_topics": None,        # List[Dict]
+
+        # step 2.5 - questions
+        "questions_artifact_path": None,
+        "questions_rows": None,
+        "questions_error": None,
+        "question_previews": {},
+        "question_verify_inflight": False,
+        "question_verify_progress": None,
+        "question_budget": {
+            "max_llm_calls_per_run": 50,
+            "max_daily_llm_calls": 300,
+        },
+        "question_stats": None,
 
         # step 3 - toc
         "toc_bundle": None,          # {"toc": [...], "topic_index": {...}}
@@ -135,6 +176,15 @@ def _render_upload(api_key_error=None):
 def _reset_downstream():
     """Reset all downstream state when a new file is uploaded or blocking re-runs."""
     state["using_sample"] = False
+    state["interview_id"] = None
+
+    state["questions_artifact_path"] = None
+    state["questions_rows"] = None
+    state["questions_error"] = None
+    state["question_previews"] = {}
+    state["question_verify_inflight"] = False
+    state["question_verify_progress"] = None
+    state["question_stats"] = None
     state["block_topics"] = None
     state["toc_bundle"] = None
     state["chapter_breaks"] = None
@@ -157,6 +207,66 @@ def _reset_downstream():
     state["revision_user_prompt"] = ""
     # Reset processor so it reinits with the current API key and block size
     state["processor"] = None
+
+
+def _sync_question_stats():
+    state["question_stats"] = compute_question_stats(state.get("questions_rows") or [])
+
+
+def _build_question_previews():
+    previews = {}
+    rows = state.get("questions_rows") or []
+    segments = state.get("segments") or []
+    for row in rows:
+        previews[row["id"]] = extract_snippet_by_timestamp(
+            segments, row.get("start_time", ""), window_segments=2
+        )
+    state["question_previews"] = previews
+
+
+def _persist_question_rows():
+    rows = state.get("questions_rows") or []
+    interview_id = state.get("interview_id") or ""
+    if not interview_id:
+        return
+    for row in rows:
+        upsert_decision(QUESTIONS_DB_PATH, interview_id, row)
+
+
+def _load_questions_into_state(force=False):
+    if state.get("questions_rows") and not force:
+        return True
+
+    interview_id = state.get("interview_id") or resolve_interview_id(
+        state.get("interview_id"),
+        state.get("srt_path"),
+        state.get("using_sample", False),
+    )
+    if not interview_id:
+        state["questions_error"] = "Could not resolve interview ID for question artifact lookup."
+        state["questions_rows"] = []
+        _sync_question_stats()
+        return False
+
+    state["interview_id"] = interview_id
+    rows, artifact_path, error = load_questions_artifact(
+        BASE_DIR,
+        interview_id,
+        explicit_path=state.get("questions_json_path_override") or None,
+    )
+    state["questions_artifact_path"] = artifact_path
+    state["questions_error"] = error
+
+    decisions = load_decisions(QUESTIONS_DB_PATH, interview_id)
+    rows = apply_saved_decisions(rows, decisions)
+    state["questions_rows"] = rows
+    _sync_question_stats()
+    _build_question_previews()
+    return len(rows) > 0
+
+
+def _verification_cache_key(snippet_hash, model, prompt_version):
+    return f"{snippet_hash}:{model}:{prompt_version}"
 
 
 def get_ctx():
@@ -247,6 +357,7 @@ def upload_run():
     state["block_size"] = block_size
     state["segments"] = segments
     state["plaintext_transcript"] = plaintext
+    state["interview_id"] = resolve_interview_id(None, filepath, use_sample)
 
     # Build text blocks
     ctx = get_ctx()
@@ -320,7 +431,262 @@ def labeling_update_output():
         state["block_topics"] = json.loads(edited)
     except json.JSONDecodeError:
         pass  # keep old state if bad JSON
-    return redirect(url_for('toc_page'))
+    return redirect(url_for('questions_page'))
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  STEP 2.5 — QUESTIONS
+# ══════════════════════════════════════════════════════════════════════
+
+@app.route('/questions', methods=['GET'])
+def questions_page():
+    if not state.get("text_blocks"):
+        return redirect(url_for('upload_page'))
+
+    _load_questions_into_state(force=False)
+
+    return render_template('questions.html', state=state)
+
+
+@app.route('/questions/load', methods=['POST'])
+def questions_load():
+    state["questions_json_path_override"] = (request.form.get('questions_json_path') or state.get("questions_json_path_override") or '').strip()
+
+    interview_id_override = (request.form.get('interview_id_override') or '').strip()
+    if interview_id_override:
+        state["interview_id"] = resolve_interview_id(
+            interview_id_override,
+            state.get("srt_path"),
+            state.get("using_sample", False),
+        )
+
+    _load_questions_into_state(force=True)
+    return render_template('questions.html', state=state)
+
+
+@app.route('/questions/update', methods=['POST'])
+def questions_update():
+    edited = request.form.get('edited_output', '[]')
+    try:
+        rows = json.loads(edited)
+    except json.JSONDecodeError:
+        rows = []
+
+    state["questions_rows"] = normalize_rows_from_ui(rows)
+    _sync_question_stats()
+    _build_question_previews()
+    _persist_question_rows()
+
+    return render_template('questions.html', state=state, questions_message="Saved question decisions.")
+
+
+@app.route('/questions/verify-low', methods=['POST'])
+def questions_verify_low():
+    edited = request.form.get('edited_output', '[]')
+    try:
+        rows = json.loads(edited)
+    except json.JSONDecodeError:
+        rows = state.get("questions_rows") or []
+    state["questions_rows"] = normalize_rows_from_ui(rows)
+
+    if not has_api_key():
+        _sync_question_stats()
+        _build_question_previews()
+        return render_template('questions.html', state=state, questions_error="OpenAI API key is required before verification.")
+
+    model = os.getenv("QUESTION_VERIFY_MODEL", "gpt-4o-mini")
+    prompt_version = os.getenv("QUESTION_VERIFY_PROMPT_VERSION", "question_verify_v1")
+    rows = state.get("questions_rows") or []
+    candidates = [row for row in rows if row.get("confidence_band") == "low" and row.get("status") != "verified"]
+
+    max_run = int((state.get("question_budget") or {}).get("max_llm_calls_per_run", 50))
+    max_daily = int((state.get("question_budget") or {}).get("max_daily_llm_calls", 300))
+    already_used_today = get_daily_usage(QUESTIONS_DB_PATH)
+    remaining_daily = max(0, max_daily - already_used_today)
+
+    state["question_verify_inflight"] = True
+    state["question_verify_progress"] = {
+        "total": len(candidates),
+        "done": 0,
+        "failed": 0,
+        "processed": 0,
+        "skipped_budget": 0,
+        "remaining_budget": remaining_daily,
+    }
+
+    processed = 0
+    failed = 0
+    skipped_budget = 0
+    llm_calls = 0
+    ctx = get_ctx()
+
+    for row in candidates:
+        if processed >= max_run or llm_calls >= remaining_daily:
+            skipped_budget += 1
+            continue
+
+        snippet = extract_snippet_by_timestamp(state.get("segments") or [], row.get("start_time", ""), window_segments=2)
+        snippet_text = snippet.get("snippet_text", "")
+        snippet_hash = hash_text(f"{row.get('question_text', '')}\n{snippet_text}")
+        cache_key = _verification_cache_key(snippet_hash, model, prompt_version)
+        cached = get_cached_llm_result(QUESTIONS_DB_PATH, cache_key)
+
+        if cached:
+            result = cached
+        else:
+            try:
+                result = verify_question(
+                    ctx,
+                    question_text=row.get("question_text", ""),
+                    snippet_text=snippet_text,
+                    model=model,
+                    prompt_version=prompt_version,
+                )
+                set_cached_llm_result(
+                    QUESTIONS_DB_PATH,
+                    cache_key=cache_key,
+                    snippet_hash=snippet_hash,
+                    model=model,
+                    prompt_version=prompt_version,
+                    result=result,
+                )
+                llm_calls += 1
+            except Exception:
+                failed += 1
+                state["question_verify_progress"]["failed"] = failed
+                continue
+
+        row["confidence"] = round(float(result.get("confidence", row.get("confidence", 0.0))), 3)
+        row["confidence_band"] = confidence_band(row["confidence"])
+        row["is_low_confidence"] = row["confidence_band"] == "low"
+        row["status"] = result.get("status_suggestion", row.get("status", "needs_review"))
+        row["verification"] = {
+            "last_method": "llm_bulk",
+            "last_model": result.get("model", model),
+            "last_prompt_version": result.get("prompt_version", prompt_version),
+            "last_checked_at": utc_now_iso(),
+            "reason_code": result.get("reason_code", "unknown"),
+        }
+        processed += 1
+        state["question_verify_progress"]["done"] = processed
+
+    if llm_calls > 0:
+        increment_daily_usage(QUESTIONS_DB_PATH, llm_calls)
+
+    state["question_verify_progress"] = {
+        "total": len(candidates),
+        "done": processed,
+        "failed": failed,
+        "processed": processed,
+        "skipped_budget": skipped_budget,
+        "remaining_budget": max(0, max_daily - get_daily_usage(QUESTIONS_DB_PATH)),
+    }
+    state["question_verify_inflight"] = False
+
+    _sync_question_stats()
+    _build_question_previews()
+    _persist_question_rows()
+
+    return render_template(
+        'questions.html',
+        state=state,
+        questions_message=f"Verification complete. processed={processed}, failed={failed}, skipped_budget={skipped_budget}.",
+    )
+
+
+@app.route('/questions/verify-one', methods=['POST'])
+def questions_verify_one():
+    edited = request.form.get('edited_output', '[]')
+    question_id = (request.form.get('question_id') or '').strip()
+    try:
+        rows = json.loads(edited)
+    except json.JSONDecodeError:
+        rows = state.get("questions_rows") or []
+    state["questions_rows"] = normalize_rows_from_ui(rows)
+
+    if not question_id:
+        _sync_question_stats()
+        _build_question_previews()
+        return render_template('questions.html', state=state, questions_error="Missing question id.")
+
+    target = None
+    for row in state.get("questions_rows") or []:
+        if row.get("id") == question_id:
+            target = row
+            break
+
+    if target is None:
+        _sync_question_stats()
+        _build_question_previews()
+        return render_template('questions.html', state=state, questions_error="Question not found.")
+
+    if not has_api_key():
+        _sync_question_stats()
+        _build_question_previews()
+        return render_template('questions.html', state=state, questions_error="OpenAI API key is required before verification.")
+
+    model = os.getenv("QUESTION_VERIFY_MODEL", "gpt-4o-mini")
+    prompt_version = os.getenv("QUESTION_VERIFY_PROMPT_VERSION", "question_verify_v1")
+    snippet = extract_snippet_by_timestamp(state.get("segments") or [], target.get("start_time", ""), window_segments=2)
+    snippet_text = snippet.get("snippet_text", "")
+    snippet_hash = hash_text(f"{target.get('question_text', '')}\n{snippet_text}")
+    cache_key = _verification_cache_key(snippet_hash, model, prompt_version)
+    cached = get_cached_llm_result(QUESTIONS_DB_PATH, cache_key)
+
+    if cached:
+        result = cached
+    else:
+        result = verify_question(
+            get_ctx(),
+            question_text=target.get("question_text", ""),
+            snippet_text=snippet_text,
+            model=model,
+            prompt_version=prompt_version,
+        )
+        set_cached_llm_result(
+            QUESTIONS_DB_PATH,
+            cache_key=cache_key,
+            snippet_hash=snippet_hash,
+            model=model,
+            prompt_version=prompt_version,
+            result=result,
+        )
+
+    target["confidence"] = round(float(result.get("confidence", target.get("confidence", 0.0))), 3)
+    target["confidence_band"] = confidence_band(target["confidence"])
+    target["is_low_confidence"] = target["confidence_band"] == "low"
+    target["status"] = result.get("status_suggestion", target.get("status", "needs_review"))
+    target["verification"] = {
+        "last_method": "llm_manual",
+        "last_model": result.get("model", model),
+        "last_prompt_version": result.get("prompt_version", prompt_version),
+        "last_checked_at": utc_now_iso(),
+        "reason_code": result.get("reason_code", "unknown"),
+    }
+
+    _sync_question_stats()
+    _build_question_previews()
+    _persist_question_rows()
+    return render_template('questions.html', state=state, questions_message="Question verified.")
+
+
+@app.route('/api/questions/progress', methods=['GET'])
+def api_questions_progress():
+    return jsonify({
+        "inflight": bool(state.get("question_verify_inflight")),
+        "progress": state.get("question_verify_progress"),
+    })
+
+
+@app.route('/api/questions', methods=['GET'])
+def api_questions():
+    return jsonify({
+        "interview_id": state.get("interview_id"),
+        "artifact_path": state.get("questions_artifact_path"),
+        "error": state.get("questions_error"),
+        "stats": state.get("question_stats"),
+        "rows": state.get("questions_rows") or [],
+    })
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -545,8 +911,13 @@ def results_page():
 @app.route('/results/download', methods=['GET'])
 def results_download():
     """Download full results as JSON."""
+    questions = state.get("questions_rows") or []
+    selected_statuses = {"verified", "needs_review"}
+    questions_selected = [q for q in questions if q.get("status") in selected_statuses]
+
     result = {
         "interview_name": os.path.basename(state["srt_path"] or "unknown"),
+        "interview_id": state.get("interview_id"),
         "block_size": state["block_size"],
         "text_blocks": state["text_blocks"],
         "block_topics": state["block_topics"],
@@ -556,6 +927,14 @@ def results_download():
         "main_summary": state["main_summary"],
         "chapters": state["chapters"],
         "tuning_results": state["tuning_results"],
+        "questions": questions,
+        "questions_selected": questions_selected,
+        "questions_meta": {
+            "questions_artifact_path": state.get("questions_artifact_path"),
+            "question_stats": state.get("question_stats"),
+            "question_budget": state.get("question_budget"),
+            "verify_progress": state.get("question_verify_progress"),
+        },
     }
 
     payload = json.dumps(result, indent=2, ensure_ascii=False, default=str).encode('utf-8')
